@@ -1,16 +1,22 @@
-# 一条流水线：编应用（aarch64）→ 编 BSP（内核/U-Boot/rootfs）→ 把应用合进 rootfs → 出 SD 卡镜像
+# 一条流水线：编应用（aarch64）→ 编 BSP → 把应用合进 rootfs → 出 SD 卡镜像
 #
 # 设计要点
-#   * 两个上游仓库都不复制进本仓库，按 ref 拉取；改 ref 就是换版本。
-#   * BSP 的 rootfs 是 "debootstrap 根 + vendor/rootfs/micro/overlay 覆盖"，
+#   * 两个上游仓库都不复制进本仓库，按 ref 拉取；改 ref / dispatch 入参就是换版本。
+#   * BSP 的 rootfs = "debootstrap 根 + vendor/rootfs/micro/overlay 覆盖"，
 #     所以应用只需要往 overlay 里丢文件（scripts/stage-app.sh），不改 BSP 脚本。
-#   * `skip_image=true`（workflow_dispatch）时只编应用，用来快速验证应用侧改动。
+#   * 产物直接可写卡：a733-image-<bsp>-<app>.img + .sha256；打 tag 时再发 Release。
+#   * 首次跑要拉 BSP 的 sources/（6~8GB）+ 全量内核编译；之后靠三层缓存：
+#       sources/  →  内核/uboot 的 out/  →  cargo registry/target
 name: build-image
 
 on:
   push:
     branches: [main]
     tags: ['v*']
+    paths-ignore: ['docs/**', '**.md']
+  pull_request:
+    types: [opened, synchronize]
+    paths-ignore: ['docs/**', '**.md']
   workflow_dispatch:
     inputs:
       app_ref:
@@ -26,8 +32,13 @@ on:
         type: boolean
         default: false
 
+# 同一分支上的旧构建直接取消：内核编译很贵，不要排队浪费 runner
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
-  contents: read
+  contents: write      # tag 时发 Release 需要
 
 env:
   BSP_REPO: weilan157/bsp
@@ -35,8 +46,10 @@ env:
   BSP_REF: ${{ inputs.bsp_ref || 'cubie-a7z-a733' }}
   APP_REF: ${{ inputs.app_ref || 'main' }}
   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+  CARGO_INCREMENTAL: '0'
 
 jobs:
+  # ─────────────────────────── 1. 应用 ───────────────────────────
   app:
     name: app (aarch64)
     runs-on: ubuntu-24.04
@@ -57,8 +70,7 @@ jobs:
 
       - name: 记录 app commit
         id: vars
-        run: |
-          echo "sha=$(git -C app rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+        run: echo "sha=$(git -C app rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: rust 工具链 + aarch64 target
         run: |
@@ -73,8 +85,31 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu libc6-dev-arm64-cross pkg-config libssl-dev
 
+      # registry 与 target 分开缓存：Cargo.lock 变了也只是重编，不重下
+      - name: 缓存 cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-reg-${{ hashFiles('app/Cargo.lock') }}
+          restore-keys: cargo-reg-
+
+      - name: 缓存 cargo target
+        uses: actions/cache@v4
+        with:
+          path: app/target
+          key: cargo-target-${{ env.APP_REF }}-${{ hashFiles('app/Cargo.lock') }}
+          restore-keys: cargo-target-${{ env.APP_REF }}-
+
       - name: 编译并整理 dist/app
         run: ./scripts/build-app.sh app dist/app
+
+      - name: 冒烟（qemu 直接跑一遍 aarch64 二进制）
+        run: |
+          sudo apt-get install -y --no-install-recommends qemu-user-static binfmt-support
+          qemu-aarch64-static -L /usr/aarch64-linux-gnu dist/app/usr/local/bin/robotd --version
+          qemu-aarch64-static -L /usr/aarch64-linux-gnu dist/app/usr/local/bin/robotctl --version
 
       - name: 上传应用产物
         uses: actions/upload-artifact@v4
@@ -84,13 +119,21 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # ─────────────────────────── 2. 镜像 ───────────────────────────
   image:
     name: image (a733)
     needs: app
-    if: ${{ !inputs.skip_image }}
+    if: ${{ !inputs.skip_image && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 340
     steps:
+      - name: 腾磁盘（runner 只有 ~14GB 空闲，BSP sources + 内核编译要 20GB+）
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/share/swift /opt/ghc /opt/android-sdk \
+                      /usr/local/lib/android /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get clean
+          df -h /
+
       - name: checkout 本仓库（scripts/ + config/）
         uses: actions/checkout@v4
 
@@ -120,6 +163,7 @@ jobs:
             dosfstools mtools e2fsprogs gdisk fakeroot uuid-runtime parted zstd xz-utils
           df -h /
 
+      # 源码缓存：键里带上 BSP ref 与 mod-a733.sh 的哈希（拉取逻辑变了就失效）
       - name: 缓存 BSP 源码（sources/ 约 6~8GB）
         uses: actions/cache@v4
         with:
@@ -127,6 +171,17 @@ jobs:
           key: a733-sources-${{ env.BSP_REF }}-${{ hashFiles('bsp/scripts/mod-a733.sh') }}
           restore-keys: |
             a733-sources-${{ env.BSP_REF }}-
+            a733-sources-
+
+      # 编译产物缓存：内核/U-Boot 的 out/ 里是 .o，命中后增量编译只需几分钟
+      - name: 缓存 BSP 编译产物（out/，跳过 rootfs 与镜像）
+        uses: actions/cache@v4
+        with:
+          path: |
+            bsp/out/kernel
+            bsp/out/uboot
+          key: a733-out-${{ env.BSP_REF }}-${{ hashFiles('bsp/scripts/mod-a733.sh', 'bsp/config.env.example') }}
+          restore-keys: a733-out-${{ env.BSP_REF }}-
 
       - name: 应用 CI 配置（直连 GitHub，不用 ghfast 代理）
         working-directory: bsp
@@ -172,7 +227,7 @@ jobs:
           img="$(ls bsp/out/a733/*.img | head -1)"
           cp "$img" "out/${name}.img"
           ( cd out && sha256sum "${name}.img" | tee "${name}.img.sha256" )
-          ls -l out
+          ls -lh out
           {
             echo "### 镜像"
             echo ""
@@ -195,3 +250,18 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+      # 打 tag（v*）时把镜像挂成 Release 资产，方便直接下载
+      - name: 发布 Release（仅 tag）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/*.img
+            out/*.sha256
+          body: |
+            A733 / Cubie A7Z image
+            - BSP：`${{ env.BSP_REPO }}@${{ env.BSP_REF }}`
+            - APP：`${{ env.APP_REPO }}@${{ env.APP_REF }}`
+            - 开机后机器人**不动**（robotd 只跑控制环、不使能扭矩）；
+              站立需要显式 `robotctl robot init`。
