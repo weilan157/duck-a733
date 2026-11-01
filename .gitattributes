@@ -1,0 +1,8 @@
+# 仓库里所有文本一律 LF——CI 是 Linux，CRLF 的 shell 脚本会
+# 报 "bad interpreter: /bin/bash^M"，YAML 也会解析异常。
+* text=auto eol=lf
+
+# 二进制/产物
+*.img binary
+*.png binary
+*.tar.gz binary
