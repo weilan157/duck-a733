@@ -1,0 +1,197 @@
+# 一条流水线：编应用（aarch64）→ 编 BSP（内核/U-Boot/rootfs）→ 把应用合进 rootfs → 出 SD 卡镜像
+#
+# 设计要点
+#   * 两个上游仓库都不复制进本仓库，按 ref 拉取；改 ref 就是换版本。
+#   * BSP 的 rootfs 是 "debootstrap 根 + vendor/rootfs/micro/overlay 覆盖"，
+#     所以应用只需要往 overlay 里丢文件（scripts/stage-app.sh），不改 BSP 脚本。
+#   * `skip_image=true`（workflow_dispatch）时只编应用，用来快速验证应用侧改动。
+name: build-image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      app_ref:
+        description: 'microduck 分支/标签/commit'
+        required: false
+        default: 'main'
+      bsp_ref:
+        description: 'bsp 分支/标签/commit'
+        required: false
+        default: 'cubie-a7z-a733'
+      skip_image:
+        description: '只编应用，不出镜像'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  BSP_REPO: weilan157/bsp
+  APP_REPO: weilan157/microduck
+  BSP_REF: ${{ inputs.bsp_ref || 'cubie-a7z-a733' }}
+  APP_REF: ${{ inputs.app_ref || 'main' }}
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+jobs:
+  app:
+    name: app (aarch64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      sha: ${{ steps.vars.outputs.sha }}
+    steps:
+      - name: checkout 本仓库（scripts/）
+        uses: actions/checkout@v4
+
+      - name: checkout microduck
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.APP_REPO }}
+          ref: ${{ env.APP_REF }}
+          path: app
+          fetch-depth: 1
+
+      - name: 记录 app commit
+        id: vars
+        run: |
+          echo "sha=$(git -C app rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: rust 工具链 + aarch64 target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-unknown-linux-gnu
+          rustc -V; cargo -V
+
+      - name: 交叉编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross pkg-config libssl-dev
+
+      - name: 编译并整理 dist/app
+        run: ./scripts/build-app.sh app dist/app
+
+      - name: 上传应用产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-dist
+          path: dist/app
+          if-no-files-found: error
+          retention-days: 14
+
+  image:
+    name: image (a733)
+    needs: app
+    if: ${{ !inputs.skip_image }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    steps:
+      - name: checkout 本仓库（scripts/ + config/）
+        uses: actions/checkout@v4
+
+      - name: 取应用产物
+        uses: actions/download-artifact@v4
+        with:
+          name: app-dist
+          path: dist/app
+
+      - name: checkout bsp
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.BSP_REPO }}
+          ref: ${{ env.BSP_REF }}
+          path: bsp
+          fetch-depth: 1
+
+      - name: 主机依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gcc-aarch64-linux-gnu bison flex bc libssl-dev libncurses-dev \
+            rsync curl wget git ca-certificates file \
+            python3 python3-setuptools swig \
+            device-tree-compiler kmod cpio \
+            debootstrap qemu-user-static binfmt-support \
+            dosfstools mtools e2fsprogs gdisk fakeroot uuid-runtime parted zstd xz-utils
+          df -h /
+
+      - name: 缓存 BSP 源码（sources/ 约 6~8GB）
+        uses: actions/cache@v4
+        with:
+          path: bsp/sources
+          key: a733-sources-${{ env.BSP_REF }}-${{ hashFiles('bsp/scripts/mod-a733.sh') }}
+          restore-keys: |
+            a733-sources-${{ env.BSP_REF }}-
+
+      - name: 应用 CI 配置（直连 GitHub，不用 ghfast 代理）
+        working-directory: bsp
+        run: |
+          cp -n config.env.example config.env 2>/dev/null || true
+          grep -v '^\s*#' ../config/a733-ci.env | grep -v '^\s*$' | while IFS='=' read -r k v; do
+            v="${v%\"}"; v="${v#\"}"
+            ./bsp config "$k=$v"
+          done
+          grep -E '^(PLATFORM|A733_.*REPO|MAKE_JOBS|ROOTFS_TYPE)=' config.env
+
+      - name: bsp setup（克隆 u-boot / kernel / bsp / device）
+        working-directory: bsp
+        run: ./bsp setup
+
+      - name: bsp uboot
+        working-directory: bsp
+        run: ./bsp uboot
+
+      - name: bsp kernel
+        working-directory: bsp
+        run: ./bsp kernel
+
+      - name: bsp rootfs
+        working-directory: bsp
+        run: ./bsp rootfs
+
+      - name: 把应用合进 rootfs overlay
+        run: ./scripts/stage-app.sh bsp dist/app
+
+      - name: bsp pack（出 SD 卡镜像）
+        working-directory: bsp
+        run: ./bsp pack
+
+      - name: 收集产物 + 校验和
+        id: collect
+        run: |
+          set -euo pipefail
+          bsp_sha="$(git -C bsp rev-parse --short HEAD)"
+          app_sha="${{ needs.app.outputs.sha }}"
+          name="a733-image-${bsp_sha}${app_sha:+-$app_sha}"
+          mkdir -p out
+          img="$(ls bsp/out/a733/*.img | head -1)"
+          cp "$img" "out/${name}.img"
+          ( cd out && sha256sum "${name}.img" | tee "${name}.img.sha256" )
+          ls -l out
+          {
+            echo "### 镜像"
+            echo ""
+            echo '```'
+            cat "out/${name}.img.sha256"
+            echo '```'
+            echo ""
+            echo "- BSP: \`${BSP_REPO}@${BSP_REF}\` (${bsp_sha})"
+            echo "- APP: \`${APP_REPO}@${APP_REF}\` (${app_sha:-n/a})"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: 上传镜像
+        uses: actions/upload-artifact@v4
+        with:
+          name: a733-image
+          path: |
+            out/*.img
+            out/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
