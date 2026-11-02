@@ -29,9 +29,9 @@ duck-a733/                        ← 新仓库（本仓库）：只放"怎么�
 | `weilan157/bsp`（本仓库的父项目，分支 `cubie-a7z-a733`） | 内核 / U-Boot / boot0 / rootfs / 打包（`./bsp` 那套） | `cubie-a7z-a733` |
 | `weilan157/microduck` | 应用：`robotd` / `robotctl`（A733 只用这两个） | `feat/feetech`（A733 + 复刻 HAT） |
 
-A733 + 复刻 HAT 是 **Feetech HD-1910**，所以流水线默认：
-`APP_REF=feat/feetech`、`APP_FEATURES=feetech`。原版 Dynamixel 硬件才回 `main`，
-并且不能传 `APP_FEATURES`。
+A733 + 复刻 HAT 是 **Feetech HD-1910**，所以流水线默认 `APP_REF=feat/feetech`。
+Feetech 是**应用分支自己的默认 feature**（`robotd/Cargo.toml` 的 `default = ["feetech"]`），
+不放在流水线 env 里：选 `feat/feetech` 就是 Feetech，选 `main` 就是 Dynamixel。
 
 这样"改动最小"：BSP 和应用各自演进，本仓库只维护**流水线 + 装配规则**。
 想固定某个版本，就把 `build-image.yml` 里的 `BSP_REF` / `APP_REF` 改成 tag 或 commit。
@@ -67,8 +67,8 @@ robotd；microduck 官方单元是给 `/opt/robot/daemon/current` + `robot/btd` 
 
 ```bash
 # 1) 应用（在 x86 主机上交叉编 aarch64）
-#    Feetech 硬件必须带 feature；不传就是 Dynamixel。
-APP_FEATURES=feetech ./scripts/build-app.sh    # 需要 rustup + aarch64 工具链
+./scripts/build-app.sh                        # feat/feetech 默认就是 Feetech
+# 如果 checkout 的 ref 还没设 default：APP_FEATURES=feetech ./scripts/build-app.sh
 # 产物: dist/app/
 
 # 2) 镜像

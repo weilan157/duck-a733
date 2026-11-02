@@ -45,9 +45,8 @@ env:
   APP_REPO: weilan157/microduck
   BSP_REF: ${{ inputs.bsp_ref || 'cubie-a7z-a733' }}
   APP_REF: ${{ inputs.app_ref || 'feat/feetech' }}
-  # A733 + 复刻 HAT 是 Feetech HD-1910；robotd 必须编 feetech feature，
-  # 否则即使 checkout 了 feat/feetech，默认仍是 Dynamixel XL330。
-  APP_FEATURES: feetech
+  # feetech 是应用分支自己的默认 feature（robotd/Cargo.toml），
+  # 不放进流水线：选 feat/feetech 就是 Feetech，选 main 就是 Dynamixel。
   # 不设 CARGO_TARGET_*_LINKER：链接器由 `cargo board`（cargo-zigbuild）自己接管。
   # 设成 aarch64-linux-gnu-gcc 会盖掉 zig 的 linker，glibc floor 就没了，而板子是
   # 2.41 的 userland——编出来能跑在本机 runner 上，到板子上才炸。
@@ -144,8 +143,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: app/target
-          key: cargo-target-${{ env.APP_REF }}-${{ env.APP_FEATURES }}-${{ hashFiles('app/Cargo.lock') }}
-          restore-keys: cargo-target-${{ env.APP_REF }}-${{ env.APP_FEATURES }}-
+          key: cargo-target-${{ env.APP_REF }}-${{ hashFiles('app/Cargo.lock') }}
+          restore-keys: cargo-target-${{ env.APP_REF }}-
 
       # 用 bash 显式调用：脚本是在 Windows 上写的，可执行位容易在提交时丢掉，
       # 别再依赖 checkout 后的 mode 位（126 Permission denied 就是这么来的）
