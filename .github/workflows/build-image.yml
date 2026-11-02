@@ -237,6 +237,18 @@ jobs:
           done
           grep -E '^(PLATFORM|A733_.*REPO|MAKE_JOBS|ROOTFS_TYPE)=' config.env
 
+      # 上面那份是"镜像侧"的工具（debootstrap/qemu/mtools…）；"BSP 构建侧"的权威
+      # 清单在 bsp 自己的 scripts/mod-a733.sh（cmd_a733_env）里，直接调它，不在这份
+      # YAML 里抄第二份——第一次跑就是因为少抄了 gcc-arm-linux-gnueabi 而挂掉：
+      # A733 的 u-boot 是 AArch32，必须用 soft-float 的 gnueabi 工具链。
+      # 顺带把 mkimage(u-boot-tools)、xxd、lz4、libelf-dev、uuid-dev 一起装上。
+      #
+      # 必须在"应用 CI 配置"之后：`./bsp env` 按 config.env 里的 PLATFORM 分发，
+      # 早于它就是 rk3566 的清单，装的全是不相干的东西。
+      - name: BSP 构建依赖（用 BSP 自己的清单）
+        working-directory: bsp
+        run: ./bsp env
+
       - name: bsp setup（克隆 u-boot / kernel / bsp / device）
         working-directory: bsp
         run: ./bsp setup
