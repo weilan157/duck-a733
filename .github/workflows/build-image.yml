@@ -45,7 +45,9 @@ env:
   APP_REPO: weilan157/microduck
   BSP_REF: ${{ inputs.bsp_ref || 'cubie-a7z-a733' }}
   APP_REF: ${{ inputs.app_ref || 'main' }}
-  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+  # 不设 CARGO_TARGET_*_LINKER：链接器由 `cargo board`（cargo-zigbuild）自己接管。
+  # 设成 aarch64-linux-gnu-gcc 会盖掉 zig 的 linker，glibc floor 就没了，而板子是
+  # 2.41 的 userland——编出来能跑在本机 runner 上，到板子上才炸。
   CARGO_INCREMENTAL: '0'
 
 jobs:
@@ -79,11 +81,51 @@ jobs:
           rustup target add aarch64-unknown-linux-gnu
           rustc -V; cargo -V
 
+      # 仓库 `.cargo/config.toml` 里的 `cargo board` = `cargo zigbuild --release
+      # --target aarch64-unknown-linux-gnu.2.31`：zig 供交叉 C 工具链，并把 glibc
+      # floor 钉在 2.31（低于板子的 2.41，留余量）。zig 版本跟着 upstream 的
+      # release 钉，别用 latest——floor 是刻意固定的输入。
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+
+      - name: cargo-zigbuild（给 `cargo board` 用）
+        run: cargo install cargo-zigbuild --locked
+
       - name: 交叉编译依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu libc6-dev-arm64-cross pkg-config libssl-dev
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross pkg-config libssl-dev binutils
+
+      # mediad 在 Linux 上非可选地依赖 gstreamer/glib——pkg-config crate，交叉编译要
+      # 目标机的头文件、.pc 和 .so。用 upstream 自己的 scripts/cross-sysroot.sh 从
+      # Debian trixie（板子同源）解包，而不是 Ubuntu multiarch：板子跑的是 Debian 的
+      # GStreamer，用 Ubuntu 的编出来只是"能链上"。
+      #
+      # 按脚本自己哈希缓存，包列表改了自然失效。
+      - name: 缓存 aarch64 sysroot
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/duck-sysroot
+          key: duck-sysroot-${{ hashFiles('app/scripts/cross-sysroot.sh') }}
+
+      - name: 取 aarch64 sysroot（GStreamer / libudev，给 mediad 用）
+        run: |
+          set -eu
+          export DUCK_SYSROOT="$HOME/.cache/duck-sysroot"
+          sh app/scripts/cross-sysroot.sh | tee /tmp/sysroot.log
+
+          # GITHUB_ENV 不做 shell 展开，而脚本打印的 RUSTFLAGS 里是
+          # "${RUSTFLAGS:+$RUSTFLAGS }-L ..."——直接写会把花括号写进变量。
+          # 所以先在这个 shell 里 eval 一遍，再写展开后的值。
+          eval "$(grep '^export' /tmp/sysroot.log)"
+          {
+            echo "PKG_CONFIG_SYSROOT_DIR=$PKG_CONFIG_SYSROOT_DIR"
+            echo "PKG_CONFIG_LIBDIR=$PKG_CONFIG_LIBDIR"
+            echo "PKG_CONFIG_ALLOW_CROSS=$PKG_CONFIG_ALLOW_CROSS"
+            echo "RUSTFLAGS=$RUSTFLAGS"
+          } >> "$GITHUB_ENV"
 
       # registry 与 target 分开缓存：Cargo.lock 变了也只是重编，不重下
       - name: 缓存 cargo registry

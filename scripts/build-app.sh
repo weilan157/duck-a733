@@ -18,7 +18,7 @@ BINS=(robotd configd btd mediad sounds robotctl)
 
 [[ -f "$APP_DIR/Cargo.toml" ]] || { echo "找不到 $APP_DIR/Cargo.toml"; exit 1; }
 
-echo ">>> cargo build ($TARGET)"
+echo ">>> 交叉编译 ($TARGET)"
 PKGS=()
 for b in "${BINS[@]}"; do
 	[[ -d "$APP_DIR/$b" ]] && PKGS+=(-p "$b")
@@ -27,7 +27,20 @@ done
 echo "    编: ${PKGS[*]}"
 
 cd "$APP_DIR"
-cargo build --release --target "$TARGET" --bins "${PKGS[@]}"
+# 优先用仓库自己的 `cargo board`（.cargo/config.toml 里的别名 = zigbuild +
+# aarch64-unknown-linux-gnu.2.31）。裸 `cargo build --target` 在这里是不行的：
+# mediad 在 Linux 上非可选地依赖 gstreamer/glib，这两个是 pkg-config crate，
+# 必须有 aarch64 的头文件、.pc 和 .so 才编得过，否则死在 glib-sys 的 build
+# script 里（"pkg-config has not been configured to support cross-compilation"）。
+# 这些由 app/scripts/cross-sysroot.sh 提供，CI 里先把 PKG_CONFIG_LIBDIR /
+# PKG_CONFIG_ALLOW_CROSS / RUSTFLAGS 导进环境。
+if command -v cargo-zigbuild >/dev/null 2>&1; then
+	echo "    toolchain: cargo board (zigbuild, glibc floor 2.31)"
+	cargo board --bins "${PKGS[@]}"
+else
+	echo "    toolchain: cargo build（没装 cargo-zigbuild；glibc floor 不钉，需自备 sysroot）"
+	cargo build --release --target "$TARGET" --bins "${PKGS[@]}"
+fi
 
 OUT="$APP_DIR/target/$TARGET/release"
 [[ -d "$OUT" ]] || { echo "没有产物目录 $OUT"; exit 1; }
