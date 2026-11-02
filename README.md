@@ -5,8 +5,7 @@
 ```
 duck-a733/                        ← 新仓库（本仓库）：只放"怎么把两者装到一起"
 ├── .github/workflows/
-│   ├── build-image.yml           ← 全流程：编应用 → 编 BSP → 合成镜像 → 出 artifact
-│   └── build-app.yml             ← 只编应用（快速反馈，不编镜像）
+│   └── build-image.yml           ← 全流程：编应用 → 编 BSP → 合成镜像 → 出 artifact
 ├── scripts/
 │   ├── build-app.sh              ← 交叉编译 microduck（aarch64），产出 dist/app/
 │   └── stage-app.sh              ← 把 dist/app/ 合进 BSP 的 rootfs 树
@@ -15,12 +14,20 @@ duck-a733/                        ← 新仓库（本仓库）：只放"怎么�
 └── README.md
 ```
 
+### 职责划分（不要越界）
+
+| 仓库 | 负责 | 不负责 |
+|---|---|---|
+| `weilan157/bsp` | 内核 / U-Boot / boot0 / rootfs / systemd 单元 / 打包 | 应用二进制 |
+| `weilan157/microduck` | `robotd` / `robotctl` 源码、Feetech 总线、策略 | 板级服务、网络/BT/配网 |
+| `weilan157/duck-a733`（本仓库） | 按 ref 拉两端、交叉编译、覆盖进 overlay、CI | 改 BSP 脚本、改应用代码 |
+
 两个上游仓库**不复制、不 fork**，流水线里按 ref 拉取：
 
 | 仓库 | 作用 | 默认 ref |
 |---|---|---|
 | `weilan157/bsp`（本仓库的父项目，分支 `cubie-a7z-a733`） | 内核 / U-Boot / boot0 / rootfs / 打包（`./bsp` 那套） | `cubie-a7z-a733` |
-| `weilan157/microduck` | 应用：`robotd` / `configd` / `btd` / `mediad` … Rust workspace | `feat/feetech`（A733 + 复刻 HAT） |
+| `weilan157/microduck` | 应用：`robotd` / `robotctl`（A733 只用这两个） | `feat/feetech`（A733 + 复刻 HAT） |
 
 A733 + 复刻 HAT 是 **Feetech HD-1910**，所以流水线默认：
 `APP_REF=feat/feetech`、`APP_FEATURES=feetech`。原版 Dynamixel 硬件才回 `main`，
@@ -43,8 +50,12 @@ BSP 的 rootfs 是把 `vendor/rootfs/micro/overlay/` 覆盖到 debootstrap 出�
 所以装配规则就一条：**把应用产物覆盖进 overlay**（`scripts/stage-app.sh`）：
 
 ```
-dist/app/usr/local/bin/{robotd,configd,btd,mediad,robotctl,...}
+dist/app/usr/local/bin/{robotd,robotctl}
 ```
+
+默认只编这两个。官方的 `configd` / `btd` / `mediad` / `sounds` 由 BSP 的
+`microduck-wifi` / `microduck-bt` / `microduck-cam` 等取代，默认不编；
+确实需要时用 `APP_EXTRA_BINS="configd btd mediad sounds"`。
 
 **只覆盖二进制，不覆盖 systemd 单元。** A733 的 `microduck-robotd.service`
 （`/usr/local/bin/robotd --port /dev/ttyAS0`，BSP 已 enable）就是唯一要跑的

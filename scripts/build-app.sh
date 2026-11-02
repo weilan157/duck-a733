@@ -7,15 +7,22 @@
 #     dist-dir 默认 ./dist/app
 #   APP_FEATURES=feetech 显式开 Feetech 总线（A733 + 复刻 HAT）。
 #
-# 只编"板子上要跑的服务/工具"，不含只给开发者用的 duckctl（它要在 x86 上跑）：
-#   robotd configd btd mediad sounds robotctl
-# 其中 mediad / duck-detect 依赖的 Rockchip 库是运行时 dlopen，编译阶段不需要。
+# 只编 A733 真正要跑的：robotd（BSP microduck-robotd.service 拉起）和
+# robotctl（健康检查/init/relax）。configd/btd/mediad/sounds 由 BSP 的
+# microduck-wifi/microduck-bt/... 取代，默认不编；需要时 APP_EXTRA_BINS。
 set -euo pipefail
 
 APP_DIR="${1:-./app}"
 DIST="${2:-./dist/app}"
 TARGET=aarch64-unknown-linux-gnu
-BINS=(robotd configd btd mediad sounds robotctl)
+BINS=(robotd robotctl)
+# A733 只用 BSP 的 microduck-* 服务 + robotd/robotctl；下面这些是官方
+# 配网/蓝牙/媒体工具，BSP 已有自己的实现，默认不编，需要时显式指定：
+#   APP_EXTRA_BINS="configd btd mediad sounds"
+if [[ -n "${APP_EXTRA_BINS:-}" ]]; then
+	# shellcheck disable=SC2206
+	BINS+=(${APP_EXTRA_BINS})
+fi
 # A733/Feetech：robotd 需要 feetech feature；CI 里显式传，避免 checkout 到
 # 没设 default 的分支时又编成 Dynamixel。
 APP_FEATURES="${APP_FEATURES:-}"
