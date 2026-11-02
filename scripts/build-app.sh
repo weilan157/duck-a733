@@ -18,6 +18,13 @@ BINS=(robotd configd btd mediad sounds robotctl)
 
 [[ -f "$APP_DIR/Cargo.toml" ]] || { echo "找不到 $APP_DIR/Cargo.toml"; exit 1; }
 
+# 下面要 cd 进 $APP_DIR（cargo 只从 cwd 及上层读 .cargo/config.toml，`board`
+# 别名就在那里面），所以两个输出路径先钉成绝对路径。不然 $DIST 会落到
+# app/dist/app，$OUT 会变成 app/app/target/...，收集阶段必然扑空。
+mkdir -p "$(dirname "$DIST")"
+DIST="$(cd "$(dirname "$DIST")" && pwd)/$(basename "$DIST")"
+APP_ABS="$(cd "$APP_DIR" && pwd)"
+
 echo ">>> 交叉编译 ($TARGET)"
 PKGS=()
 for b in "${BINS[@]}"; do
@@ -42,7 +49,7 @@ else
 	cargo build --release --target "$TARGET" --bins "${PKGS[@]}"
 fi
 
-OUT="$APP_DIR/target/$TARGET/release"
+OUT="$APP_ABS/target/$TARGET/release"
 [[ -d "$OUT" ]] || { echo "没有产物目录 $OUT"; exit 1; }
 
 echo ">>> 收集二进制与 systemd 单元 -> $DIST"
@@ -59,8 +66,8 @@ done
 
 # 官方 systemd 单元：btd / configd / robotd 是仓库里现成的
 for u in btd/systemd/btd.service configd/systemd/configd.service robotd/systemd/robotd.service; do
-	if [[ -f "$APP_DIR/$u" ]]; then
-		install -m 644 "$APP_DIR/$u" "$DIST/etc/systemd/system/$(basename "$u")"
+	if [[ -f "$APP_ABS/$u" ]]; then
+		install -m 644 "$APP_ABS/$u" "$DIST/etc/systemd/system/$(basename "$u")"
 		echo "    unit $(basename "$u")"
 	fi
 done
