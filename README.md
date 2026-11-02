@@ -20,7 +20,11 @@ duck-a733/                        ← 新仓库（本仓库）：只放"怎么�
 | 仓库 | 作用 | 默认 ref |
 |---|---|---|
 | `weilan157/bsp`（本仓库的父项目，分支 `cubie-a7z-a733`） | 内核 / U-Boot / boot0 / rootfs / 打包（`./bsp` 那套） | `cubie-a7z-a733` |
-| `weilan157/microduck` | 应用：`robotd` / `configd` / `btd` / `mediad` … Rust workspace | `main` |
+| `weilan157/microduck` | 应用：`robotd` / `configd` / `btd` / `mediad` … Rust workspace | `feat/feetech`（A733 + 复刻 HAT） |
+
+A733 + 复刻 HAT 是 **Feetech HD-1910**，所以流水线默认：
+`APP_REF=feat/feetech`、`APP_FEATURES=feetech`。原版 Dynamixel 硬件才回 `main`，
+并且不能传 `APP_FEATURES`。
 
 这样"改动最小"：BSP 和应用各自演进，本仓库只维护**流水线 + 装配规则**。
 想固定某个版本，就把 `build-image.yml` 里的 `BSP_REF` / `APP_REF` 改成 tag 或 commit。
@@ -31,7 +35,7 @@ duck-a733/                        ← 新仓库（本仓库）：只放"怎么�
 
 - `a733-image-<bsp_sha>-<app_sha>.img`（SD 卡镜像，直接 `dd` 写卡）
 - 同名 `.sha256`
-- `app-dist.tar.gz`（应用二进制 + systemd 单元，单独下载，便于在已有镜像上手动升级）
+- `app-dist.tar.gz`（应用二进制，单独下载，便于在已有镜像上手动升级）
 
 ## 应用怎么装进镜像
 
@@ -39,19 +43,21 @@ BSP 的 rootfs 是把 `vendor/rootfs/micro/overlay/` 覆盖到 debootstrap 出�
 所以装配规则就一条：**把应用产物覆盖进 overlay**（`scripts/stage-app.sh`）：
 
 ```
-dist/app/usr/local/bin/{robotd,configd,btd,mediad,robotctl,duckctl,...}
-dist/app/etc/systemd/system/{robotd,configd,btd}.service
-dist/app/etc/systemd/system/multi-user.target.wants/*.service -> ../*.service
+dist/app/usr/local/bin/{robotd,configd,btd,mediad,robotctl,...}
 ```
 
-不碰 BSP 自己的 `microduck-*` 脚本，也不改它的 systemd 单元；应用单元用官方
-`deploy/` 里那几份。要停用某个服务，删掉对应的 `.wants` 符号链接即可。
+**只覆盖二进制，不覆盖 systemd 单元。** A733 的 `microduck-robotd.service`
+（`/usr/local/bin/robotd --port /dev/ttyAS0`，BSP 已 enable）就是唯一要跑的
+robotd；microduck 官方单元是给 `/opt/robot/daemon/current` + `robot/btd` 用户
+那套 updater 布局写的，A733 镜像没有这些，两份同时 enable 会抢 `/dev/ttyAS0`。
+`build-app.sh` 因此不再复制 `robotd/configd/btd.service`。
 
 ## 本地怎么跑（和在 CI 里完全一样）
 
 ```bash
 # 1) 应用（在 x86 主机上交叉编 aarch64）
-./scripts/build-app.sh            # 需要 rustup + aarch64 工具链
+#    Feetech 硬件必须带 feature；不传就是 Dynamixel。
+APP_FEATURES=feetech ./scripts/build-app.sh    # 需要 rustup + aarch64 工具链
 # 产物: dist/app/
 
 # 2) 镜像
